@@ -88,8 +88,10 @@
     <div id="userIdInput">
         <label for="userName">Enter Your Name:</label>
         <input type="text" id="userName" placeholder="Your Name">
-        <label for="userID">Enter User ID:</label>
-        <input type="text" id="userID" placeholder="User ID">
+        <label for="userID">Enter Your User ID:</label>
+        <input type="text" id="userID" placeholder="Your User ID">
+        <label for="otherUserID">Enter User ID of the Person You Want to Join:</label>
+        <input type="text" id="otherUserID" placeholder="User ID">
         <button onclick="joinMeeting()">Join Meeting</button>
     </div>
     <div id="meetingRoom" style="display: none;">
@@ -115,17 +117,28 @@
         let myVideoStream;
         let userId;
         let userName;
+        let users = {};
 
         function joinMeeting() {
             userName = document.getElementById("userName").value.trim();
             userId = document.getElementById("userID").value.trim();
-            if (userName === "" || userId === "") {
-                alert("Please enter both your name and user ID.");
+            const otherUserId = document.getElementById("otherUserID").value.trim();
+            if (userName === "" || userId === "" || otherUserId === "") {
+                alert("Please enter your name, your user ID, and the user ID of the person you want to join.");
                 return;
             }
             socket.emit('join', { userId, userName });
+            socket.emit('joinRequest', { userId, otherUserId });
             document.getElementById("userIdInput").style.display = "none";
             document.getElementById("meetingRoom").style.display = "block";
+
+            // Check if user ID matches
+            socket.on('joinResponse', ({ success }) => {
+                if (!success) {
+                    alert("Invalid user ID. Please try again with correct user ID.");
+                    window.location.reload();
+                }
+            });
 
             navigator.mediaDevices.getUserMedia({
                 video: true,
@@ -137,10 +150,12 @@
                 socket.on('userJoined', ({ userId, userName }) => {
                     connectToNewUser({ userId, userName }, stream);
                     displayMessage(`${userName} (${userId}) has joined the meeting.`);
+                    users[userId] = userName;
                 });
 
                 socket.on('userLeft', ({ userId, userName }) => {
                     displayMessage(`${userName} (${userId}) has left the meeting.`);
+                    delete users[userId];
                     const video = document.getElementById(userId);
                     if (video) {
                         video.remove();
@@ -171,45 +186,28 @@
         }
 
         function connectToNewUser({ userId, userName }, stream) {
-            myPeer = new SimplePeer({
-                initiator: true,
-                trickle: false,
-                stream: stream
-            });
-
-            myPeer.on('signal', data => {
-                socket.emit('callUser', { userToCall: userId, signalData: data });
-            });
-
-            myPeer.on('stream', userVideoStream => {
+            const call = myPeer.call(userId, stream);
+            const video = document.createElement('video');
+            call.on('stream', userVideoStream => {
                 addVideoStream(userVideoStream, userId);
             });
-
-            socket.on('incomingCall', ({ signalData, from }) => {
-                if (from === userId) {
-                    const peer = new SimplePeer({
-                        initiator: false,
-                        trickle: false,
-                        stream: myVideoStream
-                    });
-
-                    peer.on('signal', signalData => {
-                        socket.emit('acceptCall', { callerId: from, signalData: signalData });
-                    });
-
-                    peer.signal(signalData);
-
-                    peer.on('stream', userVideoStream => {
-                        addVideoStream(userVideoStream, userId);
-                    });
-                }
+            call.on('close', () => {
+                video.remove();
+            });
+            myPeer.on('call', call => {
+                call.answer(stream);
+                const video = document.createElement('video');
+                call.on('stream', userVideoStream => {
+                    addVideoStream(userVideoStream, userId);
+                });
+                call.on('close', () => {
+                    video.remove();
+                });
             });
         }
 
-        socket.on('callAccepted', ({ receiverId, signalData }) => {
-            if (receiverId === userId) {
-                myPeer.signal(signalData);
-            }
+        socket.on('callAccepted', signal => {
+            myPeer.signal(signal);
         });
 
         function toggleAudio() {
@@ -295,8 +293,8 @@
         }
 
         function viewMembers() {
-            const memberList = Object.entries(users).map(([userId, socketId]) => {
-                return `${userId}: ${socketId}`;
+            const memberList = Object.entries(users).map(([userId, userName]) => {
+                return `${userName} (${userId})`;
             });
             alert(`Members in the meeting:\n${memberList.join('\n')}`);
         }
