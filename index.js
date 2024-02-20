@@ -18,32 +18,39 @@ const users = {};
 io.on('connection', (socket) => {
   console.log('New user connected');
 
-  socket.on('join', (userId) => {
+  socket.on('join', (userData) => {
+    const { userId, userName } = userData;
     users[userId] = socket.id;
-    console.log(`User ${userId} joined the meeting`);
+    console.log(`User ${userName} (${userId}) joined the meeting`);
 
     // Notify other users about the new participant
-    io.emit('userJoined', userId);
+    socket.broadcast.emit('userJoined', { userId, userName });
   });
 
   socket.on('disconnect', () => {
     const userId = getKeyByValue(users, socket.id);
     if (userId) {
+      const userName = users[userId];
       delete users[userId];
-      console.log(`User ${userId} left the meeting`);
+      console.log(`User ${userName} (${userId}) left the meeting`);
 
       // Notify other users about the participant who left
-      io.emit('userLeft', userId);
+      io.emit('userLeft', { userId, userName });
     }
   });
 
-  socket.on('callUser', ({ userIdToCall, signalData }) => {
-    const socketId = users[userIdToCall];
+  socket.on('callUser', ({ userToCall, signalData }) => {
+    const socketId = users[userToCall];
     io.to(socketId).emit('incomingCall', { signalData, from: socket.id });
   });
 
-  socket.on('acceptCall', ({ receiverId, signalData }) => {
-    io.to(receiverId).emit('callAccepted', signalData);
+  socket.on('acceptCall', ({ callerId, signalData }) => {
+    io.to(users[callerId]).emit('callAccepted', { signalData, receiverId: socket.id });
+  });
+
+  socket.on('chatMessage', ({ userId, message }) => {
+    const userName = users[userId];
+    io.emit('chatMessage', { userId, userName, message });
   });
 });
 

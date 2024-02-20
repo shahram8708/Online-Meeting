@@ -102,6 +102,7 @@
         <button onclick="toggleAudio()">Toggle Audio</button>
         <button onclick="toggleVideo()">Toggle Video</button>
         <button onclick="endCall()">End Call</button>
+        <button onclick="viewMembers()">View Members</button>
     </div>
     <script src="/socket.io/socket.io.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/simple-peer@latest/simplepeer.min.js"></script>
@@ -112,15 +113,17 @@
         const sharedScreen = document.getElementById('sharedScreen');
         let myPeer;
         let myVideoStream;
+        let userId;
+        let userName;
 
         function joinMeeting() {
-            const userName = document.getElementById("userName").value.trim();
-            const userId = document.getElementById("userID").value.trim();
+            userName = document.getElementById("userName").value.trim();
+            userId = document.getElementById("userID").value.trim();
             if (userName === "" || userId === "") {
                 alert("Please enter both your name and user ID.");
                 return;
             }
-            socket.emit('join', { name: userName, id: userId });
+            socket.emit('join', { userId, userName });
             document.getElementById("userIdInput").style.display = "none";
             document.getElementById("meetingRoom").style.display = "block";
 
@@ -129,28 +132,33 @@
                 audio: true
             }).then(stream => {
                 myVideoStream = stream;
-                addVideoStream(myVideoStream);
+                addVideoStream(myVideoStream, userId);
 
-                socket.on('userJoined', user => {
-                    connectToNewUser(user, stream);
-                    displayMessage(user.name + " has joined the meeting.");
+                socket.on('userJoined', ({ userId, userName }) => {
+                    connectToNewUser({ userId, userName }, stream);
+                    displayMessage(`${userName} (${userId}) has joined the meeting.`);
                 });
 
-                socket.on('userLeft', user => {
-                    displayMessage(user.name + " has left the meeting.");
+                socket.on('userLeft', ({ userId, userName }) => {
+                    displayMessage(`${userName} (${userId}) has left the meeting.`);
+                    const video = document.getElementById(userId);
+                    if (video) {
+                        video.remove();
+                    }
                 });
 
-                socket.on('chatMessage', message => {
-                    displayMessage(message);
+                socket.on('chatMessage', ({ userId, userName, message }) => {
+                    displayMessage(`${userName} (${userId}): ${message}`);
                 });
             }).catch(error => {
                 console.error('Error accessing media devices:', error.message);
             });
         }
 
-        function addVideoStream(stream) {
+        function addVideoStream(stream, userId) {
             const video = document.createElement('video');
             video.srcObject = stream;
+            video.setAttribute('id', userId);
             video.addEventListener('loadedmetadata', () => {
                 video.play();
             });
@@ -162,7 +170,7 @@
             });
         }
 
-        function connectToNewUser(user, stream) {
+        function connectToNewUser({ userId, userName }, stream) {
             myPeer = new SimplePeer({
                 initiator: true,
                 trickle: false,
@@ -170,34 +178,38 @@
             });
 
             myPeer.on('signal', data => {
-                socket.emit('callUser', { userToCall: user, signalData: data });
+                socket.emit('callUser', { userToCall: userId, signalData: data });
             });
 
             myPeer.on('stream', userVideoStream => {
-                addVideoStream(userVideoStream);
+                addVideoStream(userVideoStream, userId);
             });
 
-            socket.on('incomingCall', (data) => {
-                const peer = new SimplePeer({
-                    initiator: false,
-                    trickle: false,
-                    stream: myVideoStream
-                });
+            socket.on('incomingCall', ({ signalData, from }) => {
+                if (from === userId) {
+                    const peer = new SimplePeer({
+                        initiator: false,
+                        trickle: false,
+                        stream: myVideoStream
+                    });
 
-                peer.on('signal', signalData => {
-                    socket.emit('acceptCall', { caller: data.from, signalData: signalData });
-                });
+                    peer.on('signal', signalData => {
+                        socket.emit('acceptCall', { callerId: from, signalData: signalData });
+                    });
 
-                peer.signal(data.signalData);
+                    peer.signal(signalData);
 
-                peer.on('stream', userVideoStream => {
-                    addVideoStream(userVideoStream);
-                });
+                    peer.on('stream', userVideoStream => {
+                        addVideoStream(userVideoStream, userId);
+                    });
+                }
             });
         }
 
-        socket.on('callAccepted', signalData => {
-            myPeer.signal(signalData);
+        socket.on('callAccepted', ({ receiverId, signalData }) => {
+            if (receiverId === userId) {
+                myPeer.signal(signalData);
+            }
         });
 
         function toggleAudio() {
@@ -218,8 +230,8 @@
             const messageInput = document.getElementById('chatMessage');
             const message = messageInput.value.trim();
             if (message !== "") {
-                socket.emit('chatMessage', message);
-                displayMessage("You: " + message);
+                socket.emit('chatMessage', { userId, userName, message });
+                displayMessage(`You (${userId}): ${message}`);
                 messageInput.value = "";
             }
         }
@@ -231,18 +243,15 @@
             chatBox.scrollTop = chatBox.scrollHeight;
         }
 
-        let screenStream = null;
-
         function startScreenShare() {
             navigator.mediaDevices.getDisplayMedia({ video: true })
                 .then(stream => {
-                    screenStream = stream;
-                    const screenTrack = screenStream.getVideoTracks()[0];
+                    const screenTrack = stream.getVideoTracks()[0];
                     myPeer.replaceTrack(myVideoStream.getVideoTracks()[0], screenTrack, myVideoStream);
                     screenTrack.onended = () => {
                         stopScreenShare();
                     };
-                    sharedScreen.srcObject = screenStream;
+                    sharedScreen.srcObject = stream;
                     sharedScreen.style.display = "block";
                 })
                 .catch(error => {
@@ -251,13 +260,10 @@
         }
 
         function stopScreenShare() {
-            if (screenStream) {
-                const screenTrack = screenStream.getVideoTracks()[0];
-                screenTrack.stop();
-                myPeer.replaceTrack(screenTrack, myVideoStream.getVideoTracks()[0], myVideoStream);
-                screenStream = null;
-                sharedScreen.style.display = "none";
-            }
+            const screenTrack = sharedScreen.srcObject.getVideoTracks()[0];
+            screenTrack.stop();
+            myPeer.replaceTrack(screenTrack, myVideoStream.getVideoTracks()[0], myVideoStream);
+            sharedScreen.style.display = "none";
         }
 
         function toggleFullscreen(video) {
@@ -286,6 +292,13 @@
                     video.msRequestFullscreen();
                 }
             }
+        }
+
+        function viewMembers() {
+            const memberList = Object.entries(users).map(([userId, socketId]) => {
+                return `${userId}: ${socketId}`;
+            });
+            alert(`Members in the meeting:\n${memberList.join('\n')}`);
         }
     </script>
 </body>
