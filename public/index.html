@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Online Meeting</title>
+    <style>
+        /* Your CSS styles here */
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f4;
+        }
+
+        .container {
+            max-width: 400px;
+            margin: 50px auto;
+            padding: 20px;
+            background-color: #fff;
+            border-radius: 5px;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+        }
+
+        h1 {
+            text-align: center;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 10px;
+        }
+
+        input[type="text"] {
+            width: 100%;
+            padding: 10px;
+            margin-bottom: 20px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+        }
+
+        button {
+            display: block;
+            width: 100%;
+            padding: 10px;
+            background-color: #007bff;
+            color: #fff;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            margin-bottom: 10px;
+        }
+
+        button:hover {
+            background-color: #0056b3;
+        }
+
+        .video-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, 300px);
+            gap: 10px;
+        }
+
+        video {
+            width: 300px;
+            height: auto;
+            cursor: pointer;
+        }
+
+        #chatBox {
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            padding: 10px;
+            max-height: 200px;
+            overflow-y: auto;
+            margin-bottom: 20px;
+        }
+
+        #sharedScreen {
+            width: 100%;
+            height: auto;
+            display: none;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="userIdInput">
+        <label for="userName">Enter Your Name:</label>
+        <input type="text" id="userName" placeholder="Your Name">
+        <label for="userID">Enter User ID:</label>
+        <input type="text" id="userID" placeholder="User ID">
+        <button onclick="joinMeeting()">Join Meeting</button>
+    </div>
+    <div id="meetingRoom" style="display: none;">
+        <div class="video-grid" id="videoGrid"></div>
+        <video id="sharedScreen" autoplay></video>
+        <div id="chatBox"></div>
+        <input type="text" id="chatMessage" placeholder="Type your message...">
+        <button onclick="sendMessage()">Send</button>
+        <button onclick="startScreenShare()">Share Screen</button>
+        <button onclick="toggleAudio()">Toggle Audio</button>
+        <button onclick="toggleVideo()">Toggle Video</button>
+        <button onclick="endCall()">End Call</button>
+    </div>
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/simple-peer@latest/simplepeer.min.js"></script>
+    <script>
+        const socket = io();
+        const videoGrid = document.getElementById('videoGrid');
+        const chatBox = document.getElementById('chatBox');
+        const sharedScreen = document.getElementById('sharedScreen');
+        let myPeer;
+        let myVideoStream;
+
+        function joinMeeting() {
+            const userName = document.getElementById("userName").value.trim();
+            const userId = document.getElementById("userID").value.trim();
+            if (userName === "" || userId === "") {
+                alert("Please enter both your name and user ID.");
+                return;
+            }
+            socket.emit('join', { name: userName, id: userId });
+            document.getElementById("userIdInput").style.display = "none";
+            document.getElementById("meetingRoom").style.display = "block";
+
+            navigator.mediaDevices.getUserMedia({
+                video: true,
+                audio: true
+            }).then(stream => {
+                myVideoStream = stream;
+                addVideoStream(myVideoStream);
+
+                socket.on('userJoined', user => {
+                    connectToNewUser(user, stream);
+                    displayMessage(user.name + " has joined the meeting.");
+                });
+
+                socket.on('userLeft', user => {
+                    displayMessage(user.name + " has left the meeting.");
+                });
+
+                socket.on('chatMessage', message => {
+                    displayMessage(message);
+                });
+            }).catch(error => {
+                console.error('Error accessing media devices:', error.message);
+            });
+        }
+
+        function addVideoStream(stream) {
+            const video = document.createElement('video');
+            video.srcObject = stream;
+            video.addEventListener('loadedmetadata', () => {
+                video.play();
+            });
+            videoGrid.appendChild(video);
+
+            // Toggle fullscreen on video click
+            video.addEventListener('click', () => {
+                toggleFullscreen(video);
+            });
+        }
+
+        function connectToNewUser(user, stream) {
+            myPeer = new SimplePeer({
+                initiator: true,
+                trickle: false,
+                stream: stream
+            });
+
+            myPeer.on('signal', data => {
+                socket.emit('callUser', { userToCall: user, signalData: data });
+            });
+
+            myPeer.on('stream', userVideoStream => {
+                addVideoStream(userVideoStream);
+            });
+
+            socket.on('incomingCall', (data) => {
+                const peer = new SimplePeer({
+                    initiator: false,
+                    trickle: false,
+                    stream: myVideoStream
+                });
+
+                peer.on('signal', signalData => {
+                    socket.emit('acceptCall', { caller: data.from, signalData: signalData });
+                });
+
+                peer.signal(data.signalData);
+
+                peer.on('stream', userVideoStream => {
+                    addVideoStream(userVideoStream);
+                });
+            });
+        }
+
+        socket.on('callAccepted', signalData => {
+            myPeer.signal(signalData);
+        });
+
+        function toggleAudio() {
+            const audioEnabled = myVideoStream.getAudioTracks()[0].enabled;
+            myVideoStream.getAudioTracks()[0].enabled = !audioEnabled;
+        }
+
+        function toggleVideo() {
+            const videoEnabled = myVideoStream.getVideoTracks()[0].enabled;
+            myVideoStream.getVideoTracks()[0].enabled = !videoEnabled;
+        }
+
+        function endCall() {
+            window.location.reload();
+        }
+
+        function sendMessage() {
+            const messageInput = document.getElementById('chatMessage');
+            const message = messageInput.value.trim();
+            if (message !== "") {
+                socket.emit('chatMessage', message);
+                displayMessage("You: " + message);
+                messageInput.value = "";
+            }
+        }
+
+        function displayMessage(message) {
+            const messageElement = document.createElement('div');
+            messageElement.innerText = message;
+            chatBox.appendChild(messageElement);
+            chatBox.scrollTop = chatBox.scrollHeight;
+        }
+
+        let screenStream = null;
+
+        function startScreenShare() {
+            navigator.mediaDevices.getDisplayMedia({ video: true })
+                .then(stream => {
+                    screenStream = stream;
+                    const screenTrack = screenStream.getVideoTracks()[0];
+                    myPeer.replaceTrack(myVideoStream.getVideoTracks()[0], screenTrack, myVideoStream);
+                    screenTrack.onended = () => {
+                        stopScreenShare();
+                    };
+                    sharedScreen.srcObject = screenStream;
+                    sharedScreen.style.display = "block";
+                })
+                .catch(error => {
+                    console.error('Error accessing screen sharing:', error.message);
+                });
+        }
+
+        function stopScreenShare() {
+            if (screenStream) {
+                const screenTrack = screenStream.getVideoTracks()[0];
+                screenTrack.stop();
+                myPeer.replaceTrack(screenTrack, myVideoStream.getVideoTracks()[0], myVideoStream);
+                screenStream = null;
+                sharedScreen.style.display = "none";
+            }
+        }
+
+        function toggleFullscreen(video) {
+            if (video.requestFullscreen) {
+                if (document.fullscreenElement) {
+                    document.exitFullscreen();
+                } else {
+                    video.requestFullscreen();
+                }
+            } else if (video.mozRequestFullScreen) { /* Firefox */
+                if (document.mozFullScreen) {
+                    document.mozCancelFullScreen();
+                } else {
+                    video.mozRequestFullScreen();
+                }
+            } else if (video.webkitRequestFullscreen) { /* Chrome, Safari & Opera */
+                if (document.webkitFullscreenElement) {
+                    document.webkitExitFullscreen();
+                } else {
+                    video.webkitRequestFullscreen();
+                }
+            } else if (video.msRequestFullscreen) { /* IE/Edge */
+                if (document.msFullscreenElement) {
+                    document.msExitFullscreen();
+                } else {
+                    video.msRequestFullscreen();
+                }
+            }
+        }
+    </script>
+</body>
+
+</html>
